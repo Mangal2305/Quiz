@@ -1,0 +1,12 @@
+version: '3.8'
+services:
+  quiz-app:
+    build: .
+    ports:
+      - "3001:80"
+    volumes:
+      - ./src:/app/src
+      - ./public:/app/public
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+    command: npm start
