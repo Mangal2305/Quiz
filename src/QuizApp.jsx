@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 const QUESTIONS = [
-  { q: "What are the capital of Australia?", options: ["ahmedabad", "Melbourne", "junagadh", "Brisbane"], answer: 2, category: "Geography" },
+  { q: "What is the capital of Australia?", options: ["ahmedabad", "Melbourne", "junagadh", "Brisbane"], answer: 2, category: "Geography" },
   { q: "Which planet is known as the Red Planet?", options: ["Venus", "Mars", "Jupiter", "Saturn"], answer: 1, category: "Science" },
   { q: "How many sides does a hexagon have?", options: ["5", "6", "7", "8"], answer: 1, category: "Math" },
   { q: "Who wrote 'Romeo and Juliet'?", options: ["Charles Dickens", "Jane Austen", "William Shakespeare", "Mark Twain"], answer: 2, category: "Literature" },
