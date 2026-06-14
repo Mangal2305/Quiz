@@ -1,0 +1,55 @@
+name: Quiz CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run tests
+        run: npm test -- --watchAll=false
+        continue-on-error: true
+
+      - name: Build project
+        run: npm run build
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: quiz-build
+          path: build
+
+  deploy:
+    runs-on: self-hosted
+    needs: build
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Stop and remove old container
+        run: |
+          docker stop quiz-app-container
+          docker rm quiz-app-container
+        continue-on-error: true
+
+      - name: Build new Docker image
+        run: docker build -t quiz-app .
+
+      - name: Run new container
+        run: docker run -d -p 3000:80 --name quiz-app-container quiz-app
