@@ -42,15 +42,33 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Clean old build folder        # ✅ Remove stale build first
+        shell: powershell
+        run: |
+          if (Test-Path build) {
+            Remove-Item -Recurse -Force build
+            echo "Old build folder removed"
+          } else {
+            echo "No old build folder found"
+          }
+
       - name: Download build artifact
         uses: actions/download-artifact@v4
         with:
           name: quiz-build
-          path: build
+          path: build                        # ✅ Fresh artifact placed here
+
+      - name: Verify build folder           # ✅ Confirm files are correct
+        shell: powershell
+        run: |
+          echo "Build folder contents:"
+          ls build
+          echo "index.html content preview:"
+          Get-Content build/index.html -TotalCount 5
 
       - name: Stop and remove old container
         shell: powershell
-        continue-on-error: true            # ✅ Replaces "|| true" for Windows
+        continue-on-error: true
         run: |
           docker stop quiz-app-container
           docker rm quiz-app-container
@@ -58,7 +76,7 @@ jobs:
 
       - name: Build new Docker image
         shell: powershell
-        run: docker build -t quiz-app .
+        run: docker build --no-cache -t quiz-app .
 
       - name: Run new container
         shell: powershell
@@ -66,4 +84,4 @@ jobs:
 
       - name: Verify container is running
         shell: powershell
-        run: docker ps | findstr quiz-app-container   # ✅ "findstr" not "grep"
+        run: docker ps | findstr quiz-app-container
