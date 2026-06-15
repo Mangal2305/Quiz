@@ -5,6 +5,9 @@ on:
     branches: [ "main" ]
 
 jobs:
+  # ─────────────────────────────────────────────
+  # JOB 1 — Build (GitHub Actions, ubuntu runner)
+  # ─────────────────────────────────────────────
   build:
     runs-on: ubuntu-latest
 
@@ -28,21 +31,88 @@ jobs:
       - name: Build project
         run: npm run build
 
-      - name: Upload build
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: quiz-build
           path: build
 
+  # ─────────────────────────────────────────────
+  # JOB 2 — Trigger Jenkins pipeline after build
+  # ─────────────────────────────────────────────
+  trigger-jenkins:
+    runs-on: ubuntu-latest
+    needs: build                          # ✅ Only runs after build succeeds
+
+    steps:
+      - name: Trigger Jenkins deploy job
+        run: |
+          curl -s -o response.txt -w "%{http_code}" \
+            --user "${{ secrets.JENKINS_USER }}:${{ secrets.JENKINS_API_TOKEN }}" \
+            --data "token=${{ secrets.JENKINS_JOB_TOKEN }}" \
+            "${{ secrets.JENKINS_URL }}/job/quiz-app-deploy/build?token=${{ secrets.JENKINS_JOB_TOKEN }}" \
+            > http_status.txt
+
+          STATUS=$(cat http_status.txt)
+          echo "Jenkins responded with HTTP $STATUS"
+
+          if [ "$STATUS" != "201" ] && [ "$STATUS" != "200" ]; then
+            echo "❌ Jenkins trigger failed (HTTP $STATUS)"
+            cat response.txt
+            exit 1
+          fi
+
+          echo "✅ Jenkins job triggered successfully"
+
+      - name: Poll Jenkins for build result
+        run: |
+          # Wait for Jenkins to queue and start the job
+          sleep 10
+
+          JENKINS_BASE="${{ secrets.JENKINS_URL }}/job/quiz-app-deploy"
+          AUTH="${{ secrets.JENKINS_USER }}:${{ secrets.JENKINS_API_TOKEN }}"
+
+          # Get last build number
+          BUILD_NUMBER=$(curl -s --user "$AUTH" \
+            "$JENKINS_BASE/lastBuild/buildNumber")
+
+          echo "Polling Jenkins build #$BUILD_NUMBER ..."
+
+          # Poll every 15 s, up to 20 times (≈ 5 minutes)
+          for i in $(seq 1 20); do
+            RESULT=$(curl -s --user "$AUTH" \
+              "$JENKINS_BASE/$BUILD_NUMBER/api/json?tree=result,building" \
+              | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('result') or ('BUILDING' if d.get('building') else 'UNKNOWN'))")
+
+            echo "Attempt $i: $RESULT"
+
+            if [ "$RESULT" = "SUCCESS" ]; then
+              echo "✅ Jenkins build succeeded"
+              exit 0
+            elif [ "$RESULT" = "FAILURE" ] || [ "$RESULT" = "ABORTED" ] || [ "$RESULT" = "UNSTABLE" ]; then
+              echo "❌ Jenkins build $RESULT"
+              exit 1
+            fi
+
+            sleep 15
+          done
+
+          echo "⚠️  Timed out waiting for Jenkins result"
+          exit 1
+
+  # ─────────────────────────────────────────────
+  # JOB 3 — Deploy (self-hosted Windows runner)
+  #         Runs only when Jenkins reports success
+  # ─────────────────────────────────────────────
   deploy:
     runs-on: self-hosted
-    needs: build
+    needs: trigger-jenkins                # ✅ Waits for Jenkins to pass
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Clean old build folder        # ✅ Remove stale build first
+      - name: Clean old build folder
         shell: powershell
         run: |
           if (Test-Path build) {
@@ -56,9 +126,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: quiz-build
-          path: build                        # ✅ Fresh artifact placed here
+          path: build
 
-      - name: Verify build folder           # ✅ Confirm files are correct
+      - name: Verify build folder
         shell: powershell
         run: |
           echo "Build folder contents:"
