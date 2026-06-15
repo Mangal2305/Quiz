@@ -10,16 +10,16 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4          # ✅ Fixed: v4 not v5
+        uses: actions/checkout@v4
 
       - name: Setup Node
-        uses: actions/setup-node@v4        # ✅ Fixed: v4 not v5
+        uses: actions/setup-node@v4
         with:
           node-version: 18
           cache: npm
 
       - name: Install dependencies
-        run: npm install
+        run: npm install --legacy-peer-deps
 
       - name: Run tests
         run: npm test -- --watchAll=false
@@ -42,23 +42,28 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download build artifact        # ✅ Added: use the build from above
+      - name: Download build artifact
         uses: actions/download-artifact@v4
         with:
           name: quiz-build
           path: build
 
       - name: Stop and remove old container
+        shell: powershell
+        continue-on-error: true            # ✅ Replaces "|| true" for Windows
         run: |
-          docker stop quiz-app-container || true
-          docker rm quiz-app-container || true
-          docker rmi quiz-app || true         # ✅ Added: clean old image
+          docker stop quiz-app-container
+          docker rm quiz-app-container
+          docker rmi quiz-app
 
       - name: Build new Docker image
+        shell: powershell
         run: docker build -t quiz-app .
 
       - name: Run new container
+        shell: powershell
         run: docker run -d -p 3001:80 --name quiz-app-container quiz-app
 
-      - name: Verify container is running    # ✅ Added: sanity check
-        run: docker ps | grep quiz-app-container
+      - name: Verify container is running
+        shell: powershell
+        run: docker ps | findstr quiz-app-container   # ✅ "findstr" not "grep"
