@@ -10,10 +10,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4          # ✅ Fixed: v4 not v5
 
       - name: Setup Node
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v4        # ✅ Fixed: v4 not v5
         with:
           node-version: 18
           cache: npm
@@ -42,14 +42,23 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Download build artifact        # ✅ Added: use the build from above
+        uses: actions/download-artifact@v4
+        with:
+          name: quiz-build
+          path: build
+
       - name: Stop and remove old container
         run: |
-          docker stop quiz-app-container
-          docker rm quiz-app-container
-        continue-on-error: true
+          docker stop quiz-app-container || true
+          docker rm quiz-app-container || true
+          docker rmi quiz-app || true         # ✅ Added: clean old image
 
       - name: Build new Docker image
         run: docker build -t quiz-app .
 
       - name: Run new container
         run: docker run -d -p 3001:80 --name quiz-app-container quiz-app
+
+      - name: Verify container is running    # ✅ Added: sanity check
+        run: docker ps | grep quiz-app-container
