@@ -60,12 +60,12 @@ jobs:
             exit 1
           }
 
-          Write-Host "All secrets present. Jenkins URL: http://localhost:8080"
+          Write-Host "All secrets present. Jenkins URL: http://localhost:9090"
 
       - name: Trigger Jenkins deploy job
         shell: powershell
         run: |
-          $jenkinsUrl  = "http://localhost:8080"
+          $jenkinsUrl  = "http://localhost:9090"
           $user        = "${{ secrets.JENKINS_USER }}"
           $apiToken    = "${{ secrets.JENKINS_API_TOKEN }}"
           $jobToken    = "${{ secrets.JENKINS_JOB_TOKEN }}"
@@ -102,7 +102,7 @@ jobs:
       - name: Poll Jenkins for build result
         shell: powershell
         run: |
-          $jenkinsUrl = "http://localhost:8080"
+          $jenkinsUrl = "http://localhost:9090"
           $user       = "${{ secrets.JENKINS_USER }}"
           $apiToken   = "${{ secrets.JENKINS_API_TOKEN }}"
           $base64Auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${user}:${apiToken}"))
