@@ -17,7 +17,7 @@ pipeline {
 
         stage('Checkout') {
             steps {
-                echo 'Source code checked out by Jenkins from GitHub'
+                echo 'Checking out source code...'
                 checkout scm
             }
         }
@@ -25,21 +25,21 @@ pipeline {
         stage('Install Dependencies') {
             steps {
                 echo 'Installing npm dependencies...'
-                bat 'npm install --legacy-peer-deps'
+                sh 'npm install --legacy-peer-deps'
             }
         }
 
         stage('Run Tests') {
             steps {
                 echo 'Running tests...'
-                bat 'npm test -- --watchAll=false --passWithNoTests || exit 0'
+                sh 'npm test -- --watchAll=false --passWithNoTests || true'
             }
         }
 
         stage('Build React App') {
             steps {
                 echo 'Building React app...'
-                bat 'npm run build'
+                sh 'npm run build'
                 echo 'Build complete.'
             }
         }
@@ -47,7 +47,7 @@ pipeline {
         stage('Build Docker Image') {
             steps {
                 echo 'Building Docker image...'
-                bat 'docker build --no-cache -t quiz-app .'
+                sh 'docker build --no-cache -t quiz-app .'
                 echo 'Docker image built successfully.'
             }
         }
@@ -55,15 +55,21 @@ pipeline {
         stage('Remove Old Container') {
             steps {
                 echo 'Removing old container...'
-                bat 'docker stop quiz-app-container || exit 0'
-                bat 'docker rm   quiz-app-container || exit 0'
+                sh 'docker stop quiz-app-container || true'
+                sh 'docker rm   quiz-app-container || true'
             }
         }
 
         stage('Deploy') {
             steps {
                 echo 'Deploying new container...'
-                bat 'docker run -d -p 3001:80 --name quiz-app-container --restart unless-stopped quiz-app'
+                sh '''
+                    docker run -d \
+                      -p 3001:80 \
+                      --name quiz-app-container \
+                      --restart unless-stopped \
+                      quiz-app
+                '''
                 echo 'Container deployed on port 3001'
             }
         }
@@ -71,9 +77,11 @@ pipeline {
         stage('Health Check') {
             steps {
                 echo 'Checking container health...'
-                bat '''
-                    timeout /t 5 /nobreak
-                    docker inspect -f "{{.State.Status}}" quiz-app-container
+                sh '''
+                    sleep 5
+                    STATUS=$(docker inspect -f "{{.State.Status}}" quiz-app-container)
+                    echo "Container status: $STATUS"
+                    [ "$STATUS" = "running" ] || exit 1
                 '''
                 echo 'Health check passed.'
             }
@@ -88,7 +96,7 @@ pipeline {
             echo 'Deployment failed. Check logs above.'
         }
         always {
-            bat 'docker image prune -f || exit 0'
+            sh 'docker image prune -f || true'
         }
     }
 }
