@@ -6,7 +6,7 @@ on:
 
 jobs:
   # ─────────────────────────────────────────────
-  # JOB 1 — Build React App
+  # JOB 1 — Build React App (GitHub cloud runner)
   # ─────────────────────────────────────────────
   build:
     runs-on: ubuntu-latest
@@ -38,9 +38,8 @@ jobs:
           path: build
 
   # ─────────────────────────────────────────────
-  # JOB 2 — Trigger Jenkins on your PC via ngrok
-  #         Jenkins runs locally on your machine
-  #         ngrok exposes it to GitHub Actions
+  # JOB 2 — Trigger Jenkins (self-hosted Windows)
+  #         Uses PowerShell — no bash needed
   # ─────────────────────────────────────────────
   trigger-jenkins:
     runs-on: self-hosted
@@ -48,115 +47,110 @@ jobs:
 
     steps:
       - name: Validate Jenkins secrets
+        shell: powershell
         run: |
-          MISSING=""
-          [ -z "${{ secrets.JENKINS_URL }}"       ] && MISSING="$MISSING JENKINS_URL"
-          [ -z "${{ secrets.JENKINS_USER }}"      ] && MISSING="$MISSING JENKINS_USER"
-          [ -z "${{ secrets.JENKINS_API_TOKEN }}" ] && MISSING="$MISSING JENKINS_API_TOKEN"
-          [ -z "${{ secrets.JENKINS_JOB_TOKEN }}" ] && MISSING="$MISSING JENKINS_JOB_TOKEN"
+          $missing = @()
+          if (-not "${{ secrets.JENKINS_USER }}")      { $missing += "JENKINS_USER" }
+          if (-not "${{ secrets.JENKINS_API_TOKEN }}") { $missing += "JENKINS_API_TOKEN" }
+          if (-not "${{ secrets.JENKINS_JOB_TOKEN }}") { $missing += "JENKINS_JOB_TOKEN" }
 
-          if [ -n "$MISSING" ]; then
-            echo "❌ Missing GitHub secrets:$MISSING"
-            echo "👉 Go to: repo → Settings → Secrets → Actions → New secret"
+          if ($missing.Count -gt 0) {
+            Write-Host "Missing GitHub secrets: $($missing -join ', ')"
+            Write-Host "Go to: repo Settings > Secrets > Actions > New secret"
             exit 1
-          fi
+          }
 
-          echo "✅ All secrets present. Jenkins URL: ${JENKINS_URL%/}"
+          Write-Host "All secrets present. Jenkins URL: http://localhost:8080"
 
       - name: Trigger Jenkins deploy job
+        shell: powershell
         run: |
-          JENKINS_URL="http://localhost:8080"
-          JENKINS_URL="${JENKINS_URL%/}"
+          $jenkinsUrl  = "http://localhost:8080"
+          $user        = "${{ secrets.JENKINS_USER }}"
+          $apiToken    = "${{ secrets.JENKINS_API_TOKEN }}"
+          $jobToken    = "${{ secrets.JENKINS_JOB_TOKEN }}"
+          $base64Auth  = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${user}:${apiToken}"))
 
-          echo "🚀 Triggering Jenkins at: $JENKINS_URL"
+          Write-Host "Triggering Jenkins at: $jenkinsUrl"
 
-          HTTP_STATUS=$(curl \
-            --silent \
-            --output response.txt \
-            --write-out "%{http_code}" \
-            --connect-timeout 15 \
-            --max-time 30 \
-            --user "${{ secrets.JENKINS_USER }}:${{ secrets.JENKINS_API_TOKEN }}" \
-            --data "token=${{ secrets.JENKINS_JOB_TOKEN }}" \
-            "$JENKINS_URL/job/quiz-app-deploy/build?token=${{ secrets.JENKINS_JOB_TOKEN }}")
+          try {
+            $response = Invoke-WebRequest `
+              -Uri "$jenkinsUrl/job/quiz-app-deploy/build?token=$jobToken" `
+              -Method POST `
+              -Headers @{ Authorization = "Basic $base64Auth" } `
+              -Body "token=$jobToken" `
+              -UseBasicParsing `
+              -TimeoutSec 30
 
-          CURL_EXIT=$?
+            Write-Host "Jenkins HTTP response: $($response.StatusCode)"
 
-          if [ $CURL_EXIT -ne 0 ]; then
-            echo "❌ curl failed (exit $CURL_EXIT)"
-            case $CURL_EXIT in
-              3)  echo "   → Bad URL. Check JENKINS_URL secret (e.g. https://xxxx.ngrok-free.app)" ;;
-              6)  echo "   → Cannot resolve host. Is ngrok running on your PC?" ;;
-              7)  echo "   → Connection refused. Is Jenkins running? Is ngrok active?" ;;
-              28) echo "   → Timed out. ngrok tunnel may be down." ;;
-            esac
+            if ($response.StatusCode -eq 200 -or $response.StatusCode -eq 201) {
+              Write-Host "Jenkins job triggered successfully"
+            } else {
+              Write-Host "Unexpected status: $($response.StatusCode)"
+              exit 1
+            }
+          } catch {
+            $status = $_.Exception.Response.StatusCode.value__
+            Write-Host "Jenkins trigger failed: $_"
+            if ($status -eq 403) { Write-Host "403: Check JENKINS_USER and JENKINS_API_TOKEN" }
+            if ($status -eq 404) { Write-Host "404: Job quiz-app-deploy not found in Jenkins" }
+            if (-not $status)    { Write-Host "Connection refused. Is Jenkins running? Run: docker start jenkins" }
             exit 1
-          fi
-
-          echo "Jenkins HTTP response: $HTTP_STATUS"
-          cat response.txt || true
-
-          if [ "$HTTP_STATUS" != "201" ] && [ "$HTTP_STATUS" != "200" ]; then
-            echo "❌ Jenkins trigger failed (HTTP $HTTP_STATUS)"
-            [ "$HTTP_STATUS" = "403" ] && echo "   → 403: Check JENKINS_USER and JENKINS_API_TOKEN"
-            [ "$HTTP_STATUS" = "404" ] && echo "   → 404: Job 'quiz-app-deploy' not found in Jenkins"
-            exit 1
-          fi
-
-          echo "✅ Jenkins job triggered successfully"
+          }
 
       - name: Poll Jenkins for build result
+        shell: powershell
         run: |
-          JENKINS_URL="${{ secrets.JENKINS_URL }}"
-          JENKINS_URL="${JENKINS_URL%/}"
-          AUTH="${{ secrets.JENKINS_USER }}:${{ secrets.JENKINS_API_TOKEN }}"
-          JENKINS_BASE="$JENKINS_URL/job/quiz-app-deploy"
+          $jenkinsUrl = "http://localhost:8080"
+          $user       = "${{ secrets.JENKINS_USER }}"
+          $apiToken   = "${{ secrets.JENKINS_API_TOKEN }}"
+          $base64Auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${user}:${apiToken}"))
+          $headers    = @{ Authorization = "Basic $base64Auth" }
+          $base       = "$jenkinsUrl/job/quiz-app-deploy"
 
-          echo "⏳ Waiting 15s for Jenkins to start the build..."
-          sleep 15
+          Write-Host "Waiting 15s for Jenkins to start the build..."
+          Start-Sleep -Seconds 15
 
-          BUILD_NUMBER=$(curl -sf --user "$AUTH" \
-            --connect-timeout 10 \
-            "$JENKINS_BASE/lastBuild/buildNumber" 2>/dev/null || echo "")
-
-          if [ -z "$BUILD_NUMBER" ]; then
-            echo "❌ Could not get build number from Jenkins."
-            echo "   Check: is ngrok still running? Is job named exactly 'quiz-app-deploy'?"
+          try {
+            $buildNumber = (Invoke-WebRequest -Uri "$base/lastBuild/buildNumber" -Headers $headers -UseBasicParsing).Content.Trim()
+            Write-Host "Polling Jenkins build #$buildNumber..."
+          } catch {
+            Write-Host "Could not get build number. Is job named exactly quiz-app-deploy?"
             exit 1
-          fi
+          }
 
-          echo "📊 Polling Jenkins build #$BUILD_NUMBER..."
+          for ($i = 1; $i -le 30; $i++) {
+            try {
+              $json   = (Invoke-WebRequest -Uri "$base/$buildNumber/api/json?tree=result,building" -Headers $headers -UseBasicParsing).Content
+              $data   = $json | ConvertFrom-Json
+              $result = if ($data.result) { $data.result } elseif ($data.building) { "BUILDING" } else { "UNKNOWN" }
+            } catch {
+              $result = "UNKNOWN"
+            }
 
-          for i in $(seq 1 30); do
-            PAYLOAD=$(curl -sf --user "$AUTH" \
-              --connect-timeout 10 \
-              "$JENKINS_BASE/$BUILD_NUMBER/api/json?tree=result,building" 2>/dev/null || echo "{}")
+            Write-Host "Attempt $i/30: $result"
 
-            RESULT=$(echo "$PAYLOAD" | python3 -c \
-              "import sys,json; d=json.load(sys.stdin); print(d.get('result') or ('BUILDING' if d.get('building') else 'UNKNOWN'))" \
-              2>/dev/null || echo "UNKNOWN")
-
-            echo "Attempt $i/30 → $RESULT"
-
-            if [ "$RESULT" = "SUCCESS" ]; then
-              echo "✅ Jenkins build SUCCEEDED"
+            if ($result -eq "SUCCESS") {
+              Write-Host "Jenkins build SUCCEEDED"
               exit 0
-            elif [ "$RESULT" = "FAILURE" ] || [ "$RESULT" = "ABORTED" ] || [ "$RESULT" = "UNSTABLE" ]; then
-              echo "❌ Jenkins build $RESULT"
-              curl -sf --user "$AUTH" \
-                "$JENKINS_BASE/$BUILD_NUMBER/consoleText" 2>/dev/null | tail -30 || true
+            } elseif ($result -eq "FAILURE" -or $result -eq "ABORTED" -or $result -eq "UNSTABLE") {
+              Write-Host "Jenkins build $result"
+              try {
+                $log = (Invoke-WebRequest -Uri "$base/$buildNumber/consoleText" -Headers $headers -UseBasicParsing).Content
+                $log -split "`n" | Select-Object -Last 30 | ForEach-Object { Write-Host $_ }
+              } catch {}
               exit 1
-            fi
+            }
 
-            sleep 15
-          done
+            Start-Sleep -Seconds 15
+          }
 
-          echo "⚠️ Timed out after 7.5 minutes waiting for Jenkins"
+          Write-Host "Timed out after 7.5 minutes"
           exit 1
 
   # ─────────────────────────────────────────────
-  # JOB 3 — Deploy on your self-hosted Windows PC
-  #         Runs only after Jenkins reports success
+  # JOB 3 — Deploy quiz-app container
   # ─────────────────────────────────────────────
   deploy:
     runs-on: self-hosted
@@ -171,9 +165,9 @@ jobs:
         run: |
           if (Test-Path build) {
             Remove-Item -Recurse -Force build
-            echo "Old build folder removed"
+            Write-Host "Old build folder removed"
           } else {
-            echo "No old build folder found"
+            Write-Host "No old build folder found"
           }
 
       - name: Download build artifact
@@ -185,9 +179,9 @@ jobs:
       - name: Verify build folder
         shell: powershell
         run: |
-          echo "Build folder contents:"
-          ls build
-          echo "index.html preview:"
+          Write-Host "Build folder contents:"
+          Get-ChildItem build
+          Write-Host "index.html preview:"
           Get-Content build/index.html -TotalCount 5
 
       - name: Stop and remove old container
@@ -210,4 +204,4 @@ jobs:
         shell: powershell
         run: |
           docker ps | findstr quiz-app-container
-          echo "✅ quiz-app is live on http://localhost:3001"
+          Write-Host "quiz-app is live on http://localhost:3001"
