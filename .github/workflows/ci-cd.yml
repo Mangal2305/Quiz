@@ -9,7 +9,7 @@ jobs:
   # JOB 1 — Build React App
   # ─────────────────────────────────────────────
   build:
-    runs-on: self-hosted 
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
@@ -43,7 +43,7 @@ jobs:
   #         ngrok exposes it to GitHub Actions
   # ─────────────────────────────────────────────
   trigger-jenkins:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: build
 
     steps:
@@ -61,12 +61,11 @@ jobs:
             exit 1
           fi
 
-          JENKINS_URL="${{ secrets.JENKINS_URL }}"
           echo "✅ All secrets present. Jenkins URL: ${JENKINS_URL%/}"
 
       - name: Trigger Jenkins deploy job
         run: |
-          JENKINS_URL="${{ secrets.JENKINS_URL }}"
+          JENKINS_URL="http://localhost:8080"
           JENKINS_URL="${JENKINS_URL%/}"
 
           echo "🚀 Triggering Jenkins at: $JENKINS_URL"
