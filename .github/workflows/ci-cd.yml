@@ -38,261 +38,91 @@ jobs:
           path: build
 
   # ─────────────────────────────────────────────
-  # JOB 2 — Run Jenkins inside Docker
-  #         No external Jenkins server needed!
-  #         Uses jenkins/jenkins:lts Docker image
+  # JOB 2 — Trigger Jenkins on your PC via ngrok
+  #         Jenkins runs locally on your machine
+  #         ngrok exposes it to GitHub Actions
   # ─────────────────────────────────────────────
-  jenkins:
+  trigger-jenkins:
     runs-on: ubuntu-latest
-    needs: build                  # ✅ Only runs after build succeeds
+    needs: build
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Download build artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: quiz-build
-          path: build
-
-      # ── Start Jenkins container ────────────────
-      - name: Start Jenkins Docker container
+      - name: Validate Jenkins secrets
         run: |
-          echo "🐳 Pulling Jenkins LTS image..."
-          docker pull jenkins/jenkins:lts
+          MISSING=""
+          [ -z "${{ secrets.JENKINS_URL }}"       ] && MISSING="$MISSING JENKINS_URL"
+          [ -z "${{ secrets.JENKINS_USER }}"      ] && MISSING="$MISSING JENKINS_USER"
+          [ -z "${{ secrets.JENKINS_API_TOKEN }}" ] && MISSING="$MISSING JENKINS_API_TOKEN"
+          [ -z "${{ secrets.JENKINS_JOB_TOKEN }}" ] && MISSING="$MISSING JENKINS_JOB_TOKEN"
 
-          echo "🚀 Starting Jenkins container..."
-          docker run -d \
-            --name jenkins \
-            -p 8080:8080 \
-            -p 50000:50000 \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v $(which docker):/usr/bin/docker \
-            -e JAVA_OPTS="-Djenkins.install.runSetupWizard=false" \
-            jenkins/jenkins:lts
-
-          echo "✅ Jenkins container started"
-
-      # ── Install plugins & wait for Jenkins ────
-      - name: Wait for Jenkins to be ready
-        run: |
-          echo "⏳ Waiting for Jenkins to start..."
-          for i in $(seq 1 30); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/login 2>/dev/null || echo "000")
-            echo "Attempt $i/30 — HTTP $STATUS"
-            if [ "$STATUS" = "200" ]; then
-              echo "✅ Jenkins is up!"
-              break
-            fi
-            sleep 10
-          done
-
-          if [ "$STATUS" != "200" ]; then
-            echo "❌ Jenkins did not start in time"
-            docker logs jenkins
+          if [ -n "$MISSING" ]; then
+            echo "❌ Missing GitHub secrets:$MISSING"
+            echo "👉 Go to: repo → Settings → Secrets → Actions → New secret"
             exit 1
           fi
 
-      # ── Get admin password & create API token ─
-      - name: Configure Jenkins admin & API token
-        run: |
-          echo "🔑 Fetching Jenkins initial admin password..."
-          sleep 5
-          ADMIN_PASS=$(docker exec jenkins \
-            cat /var/jenkins_home/secrets/initialAdminPassword 2>/dev/null || echo "")
+          JENKINS_URL="${{ secrets.JENKINS_URL }}"
+          echo "✅ All secrets present. Jenkins URL: ${JENKINS_URL%/}"
 
-          if [ -z "$ADMIN_PASS" ]; then
-            echo "❌ Could not retrieve Jenkins admin password"
-            docker logs jenkins --tail 50
+      - name: Trigger Jenkins deploy job
+        run: |
+          JENKINS_URL="${{ secrets.JENKINS_URL }}"
+          JENKINS_URL="${JENKINS_URL%/}"
+
+          echo "🚀 Triggering Jenkins at: $JENKINS_URL"
+
+          HTTP_STATUS=$(curl \
+            --silent \
+            --output response.txt \
+            --write-out "%{http_code}" \
+            --connect-timeout 15 \
+            --max-time 30 \
+            --user "${{ secrets.JENKINS_USER }}:${{ secrets.JENKINS_API_TOKEN }}" \
+            --data "token=${{ secrets.JENKINS_JOB_TOKEN }}" \
+            "$JENKINS_URL/job/quiz-app-deploy/build?token=${{ secrets.JENKINS_JOB_TOKEN }}")
+
+          CURL_EXIT=$?
+
+          if [ $CURL_EXIT -ne 0 ]; then
+            echo "❌ curl failed (exit $CURL_EXIT)"
+            case $CURL_EXIT in
+              3)  echo "   → Bad URL. Check JENKINS_URL secret (e.g. https://xxxx.ngrok-free.app)" ;;
+              6)  echo "   → Cannot resolve host. Is ngrok running on your PC?" ;;
+              7)  echo "   → Connection refused. Is Jenkins running? Is ngrok active?" ;;
+              28) echo "   → Timed out. ngrok tunnel may be down." ;;
+            esac
             exit 1
           fi
 
-          echo "JENKINS_PASS=$ADMIN_PASS" >> $GITHUB_ENV
-          echo "✅ Admin password retrieved"
+          echo "Jenkins HTTP response: $HTTP_STATUS"
+          cat response.txt || true
 
-          # Install required plugins via Jenkins CLI
-          echo "📦 Installing Jenkins plugins..."
-          docker exec jenkins jenkins-plugin-cli \
-            --plugins workflow-aggregator git nodejs docker-workflow \
-            --latest true 2>/dev/null || true
-
-          # Wait for restart after plugin install
-          sleep 20
-
-      # ── Create the quiz-app-deploy job via API ─
-      - name: Create Jenkins pipeline job
-        run: |
-          JENKINS_URL="http://localhost:8080"
-          AUTH="admin:${{ env.JENKINS_PASS }}"
-
-          # Get crumb for CSRF
-          CRUMB=$(curl -sf --user "$AUTH" \
-            "$JENKINS_URL/crumbIssuer/api/json" \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['crumb'])" 2>/dev/null || echo "")
-
-          CRUMB_HEADER=""
-          [ -n "$CRUMB" ] && CRUMB_HEADER="Jenkins-Crumb:$CRUMB"
-
-          echo "📋 Creating quiz-app-deploy pipeline job..."
-
-          # Job config XML with inline Jenkinsfile pipeline
-          cat > /tmp/job-config.xml << 'JOBXML'
-          <?xml version='1.1' encoding='UTF-8'?>
-          <flow-definition plugin="workflow-job">
-            <description>Quiz App Deploy Pipeline</description>
-            <keepDependencies>false</keepDependencies>
-            <properties>
-              <hudson.model.ParametersDefinitionProperty>
-                <parameterDefinitions/>
-              </hudson.model.ParametersDefinitionProperty>
-            </properties>
-            <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps">
-              <script>
-          pipeline {
-              agent any
-              environment {
-                  APP_NAME       = 'quiz-app'
-                  CONTAINER_NAME = 'quiz-app-container'
-                  HOST_PORT      = '3001'
-                  CONTAINER_PORT = '80'
-              }
-              stages {
-                  stage('Checkout') {
-                      steps { echo '📥 Source already checked out by GitHub Actions' }
-                  }
-                  stage('Install Dependencies') {
-                      steps {
-                          sh 'cd /workspace &amp;&amp; npm install --legacy-peer-deps || true'
-                          echo '📦 Dependencies ready'
-                      }
-                  }
-                  stage('Run Tests') {
-                      steps {
-                          sh 'cd /workspace &amp;&amp; npm test -- --watchAll=false --passWithNoTests || true'
-                      }
-                  }
-                  stage('Build Docker Image') {
-                      steps {
-                          sh 'docker build --no-cache -t quiz-app /workspace'
-                          echo '✅ Docker image built'
-                      }
-                  }
-                  stage('Remove Old Container') {
-                      steps {
-                          sh 'docker stop quiz-app-container || true'
-                          sh 'docker rm   quiz-app-container || true'
-                      }
-                  }
-                  stage('Deploy') {
-                      steps {
-                          sh '''
-                              docker run -d \
-                                -p 3001:80 \
-                                --name quiz-app-container \
-                                --restart unless-stopped \
-                                quiz-app
-                          '''
-                          echo '🚀 Container deployed on port 3001'
-                      }
-                  }
-                  stage('Health Check') {
-                      steps {
-                          sh 'sleep 5'
-                          sh '''
-                              STATUS=$(docker inspect -f "{{.State.Status}}" quiz-app-container)
-                              echo "Container status: $STATUS"
-                              [ "$STATUS" = "running" ] || exit 1
-                          '''
-                          echo '✅ Health check passed'
-                      }
-                  }
-              }
-              post {
-                  success { echo '🎉 quiz-app deployed successfully on port 3001!' }
-                  failure { echo '❌ Deployment failed — check logs above' }
-                  always  { sh 'docker image prune -f || true' }
-              }
-          }
-              </script>
-              <sandbox>true</sandbox>
-            </definition>
-            <triggers/>
-          </flow-definition>
-          JOBXML
-
-          # Create job via Jenkins API
-          if [ -n "$CRUMB_HEADER" ]; then
-            HTTP=$(curl -sf -o /dev/null -w "%{http_code}" \
-              --user "$AUTH" \
-              -H "$CRUMB_HEADER" \
-              -H "Content-Type: application/xml" \
-              --data-binary @/tmp/job-config.xml \
-              "$JENKINS_URL/createItem?name=quiz-app-deploy")
-          else
-            HTTP=$(curl -sf -o /dev/null -w "%{http_code}" \
-              --user "$AUTH" \
-              -H "Content-Type: application/xml" \
-              --data-binary @/tmp/job-config.xml \
-              "$JENKINS_URL/createItem?name=quiz-app-deploy")
+          if [ "$HTTP_STATUS" != "201" ] && [ "$HTTP_STATUS" != "200" ]; then
+            echo "❌ Jenkins trigger failed (HTTP $HTTP_STATUS)"
+            [ "$HTTP_STATUS" = "403" ] && echo "   → 403: Check JENKINS_USER and JENKINS_API_TOKEN"
+            [ "$HTTP_STATUS" = "404" ] && echo "   → 404: Job 'quiz-app-deploy' not found in Jenkins"
+            exit 1
           fi
 
-          echo "Job creation HTTP status: $HTTP"
-          [ "$HTTP" = "200" ] || [ "$HTTP" = "201" ] && echo "✅ Job created" || echo "⚠️ Job may already exist, continuing..."
+          echo "✅ Jenkins job triggered successfully"
 
-      # ── Copy workspace into Jenkins reach ─────
-      - name: Prepare workspace for Jenkins
+      - name: Poll Jenkins for build result
         run: |
-          echo "📁 Copying project files to /workspace for Jenkins..."
-          sudo mkdir -p /workspace
-          sudo cp -r . /workspace/
-          sudo chmod -R 777 /workspace
-          echo "✅ Workspace ready at /workspace"
-
-      # ── Trigger the Jenkins job ────────────────
-      - name: Trigger Jenkins pipeline job
-        run: |
-          JENKINS_URL="http://localhost:8080"
-          AUTH="admin:${{ env.JENKINS_PASS }}"
-
-          CRUMB=$(curl -sf --user "$AUTH" \
-            "$JENKINS_URL/crumbIssuer/api/json" \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['crumb'])" 2>/dev/null || echo "")
-
-          echo "🚀 Triggering quiz-app-deploy job..."
-
-          if [ -n "$CRUMB" ]; then
-            HTTP=$(curl -sf -o /dev/null -w "%{http_code}" \
-              --user "$AUTH" \
-              -H "Jenkins-Crumb:$CRUMB" \
-              --data "" \
-              "$JENKINS_URL/job/quiz-app-deploy/build")
-          else
-            HTTP=$(curl -sf -o /dev/null -w "%{http_code}" \
-              --user "$AUTH" \
-              --data "" \
-              "$JENKINS_URL/job/quiz-app-deploy/build")
-          fi
-
-          echo "Trigger HTTP status: $HTTP"
-          echo "✅ Jenkins job triggered (HTTP $HTTP)"
-
-      # ── Poll until Jenkins build finishes ─────
-      - name: Poll Jenkins build result
-        run: |
-          JENKINS_URL="http://localhost:8080"
-          AUTH="admin:${{ env.JENKINS_PASS }}"
+          JENKINS_URL="${{ secrets.JENKINS_URL }}"
+          JENKINS_URL="${JENKINS_URL%/}"
+          AUTH="${{ secrets.JENKINS_USER }}:${{ secrets.JENKINS_API_TOKEN }}"
           JENKINS_BASE="$JENKINS_URL/job/quiz-app-deploy"
 
           echo "⏳ Waiting 15s for Jenkins to start the build..."
           sleep 15
 
           BUILD_NUMBER=$(curl -sf --user "$AUTH" \
+            --connect-timeout 10 \
             "$JENKINS_BASE/lastBuild/buildNumber" 2>/dev/null || echo "")
 
           if [ -z "$BUILD_NUMBER" ]; then
-            echo "❌ Could not get build number — dumping Jenkins logs:"
-            docker logs jenkins --tail 60
+            echo "❌ Could not get build number from Jenkins."
+            echo "   Check: is ngrok still running? Is job named exactly 'quiz-app-deploy'?"
             exit 1
           fi
 
@@ -300,6 +130,7 @@ jobs:
 
           for i in $(seq 1 30); do
             PAYLOAD=$(curl -sf --user "$AUTH" \
+              --connect-timeout 10 \
               "$JENKINS_BASE/$BUILD_NUMBER/api/json?tree=result,building" 2>/dev/null || echo "{}")
 
             RESULT=$(echo "$PAYLOAD" | python3 -c \
@@ -312,42 +143,25 @@ jobs:
               echo "✅ Jenkins build SUCCEEDED"
               exit 0
             elif [ "$RESULT" = "FAILURE" ] || [ "$RESULT" = "ABORTED" ] || [ "$RESULT" = "UNSTABLE" ]; then
-              echo "❌ Jenkins build $RESULT — fetching console output:"
+              echo "❌ Jenkins build $RESULT"
               curl -sf --user "$AUTH" \
-                "$JENKINS_BASE/$BUILD_NUMBER/consoleText" 2>/dev/null | tail -40
+                "$JENKINS_BASE/$BUILD_NUMBER/consoleText" 2>/dev/null | tail -30 || true
               exit 1
             fi
 
             sleep 15
           done
 
-          echo "⚠️ Timed out after 7.5 minutes"
-          docker logs jenkins --tail 30
+          echo "⚠️ Timed out after 7.5 minutes waiting for Jenkins"
           exit 1
 
-      # ── Show running containers after deploy ──
-      - name: Show deployed containers
-        if: always()
-        run: |
-          echo "🐳 Running Docker containers:"
-          docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
-
-      # ── Cleanup Jenkins container ─────────────
-      - name: Cleanup Jenkins container
-        if: always()
-        run: |
-          echo "🧹 Stopping Jenkins container..."
-          docker stop jenkins || true
-          docker rm   jenkins || true
-          echo "✅ Jenkins cleaned up"
-
   # ─────────────────────────────────────────────
-  # JOB 3 — Deploy to self-hosted Windows runner
-  #         Runs after Jenkins job passes
+  # JOB 3 — Deploy on your self-hosted Windows PC
+  #         Runs only after Jenkins reports success
   # ─────────────────────────────────────────────
   deploy:
     runs-on: self-hosted
-    needs: jenkins                # ✅ Waits for Jenkins Docker job to pass
+    needs: trigger-jenkins
 
     steps:
       - name: Checkout code
@@ -374,7 +188,7 @@ jobs:
         run: |
           echo "Build folder contents:"
           ls build
-          echo "index.html content preview:"
+          echo "index.html preview:"
           Get-Content build/index.html -TotalCount 5
 
       - name: Stop and remove old container
@@ -397,5 +211,4 @@ jobs:
         shell: powershell
         run: |
           docker ps | findstr quiz-app-container
-          echo "✅ quiz-app is live on port 3001"
-          
+          echo "✅ quiz-app is live on http://localhost:3001"
