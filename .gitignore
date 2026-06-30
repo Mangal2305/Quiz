@@ -26,3 +26,6 @@ yarn-error.log*
 
 actions-runner/
 redeploy.bat
+
+
+"node_modules/`n.env`nbuild/" | Out-File -Encoding utf8 .gitignore
